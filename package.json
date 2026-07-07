@@ -1,0 +1,14 @@
+{
+  "name": "offscript-notify",
+  "description": "OFFscript scheduled notification worker (runs on GitHub Actions, free)",
+  "version": "1.0.0",
+  "private": true,
+  "main": "notify.js",
+  "scripts": {
+    "start": "node notify.js",
+    "dry": "node notify.js --dry"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0"
+  }
+}
