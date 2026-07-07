@@ -1,0 +1,40 @@
+name: OFFscript calendar feed
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # refresh the feed every 15 min (calendar apps poll slowly anyway)
+  workflow_dispatch:
+
+permissions:
+  contents: write   # allow committing the regenerated feed back to the repo
+
+concurrency:
+  group: offscript-calendar
+  cancel-in-progress: false
+
+jobs:
+  feed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install deps
+        run: npm ci --omit=dev || npm install --omit=dev
+      - name: Generate calendar feed
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: node calendar.js
+      - name: Commit feed if changed
+        run: |
+          git config user.name "offscript-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add feed/offscript-cal-8x3f.ics
+          if git diff --staged --quiet; then
+            echo "feed unchanged"
+          else
+            git commit -m "chore: update calendar feed [skip ci]"
+            git push
+          fi
