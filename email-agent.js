@@ -90,7 +90,7 @@ function parseJSON(txt) {
     null, { Prefer: 'outlook.body-content-type="text"' });
 
   const msgs = (list.value || []).filter(m => !processed[m.id]);
-  let drafted = 0, leadsMade = 0, skipped = 0;
+  let drafted = 0, sent = 0, leadsMade = 0, skipped = 0;
 
   // Pipeline (for lead creation)
   const pipeRef = db.doc('boards/pipeline');
@@ -134,13 +134,18 @@ function parseJSON(txt) {
     console.log(`[${known ? 'CLIENT' : 'COLD'}] ${fromAddr} — cat=${res.category} reply=${res.shouldReply}` + (DRY ? '' : ''));
 
     if (res.shouldReply && res.reply) {
-      if (DRY) { console.log('   [DRY] would draft reply (' + res.reply.length + ' chars)'); }
-      else {
-        try {
-          await graph(tok, 'POST', `/users/${ADDR}/messages/${m.id}/createReply`, { comment: res.reply });
-          drafted++;
-          console.log('   ✓ draft reply created in Outlook');
-        } catch (e) { console.error('   draft failed:', e.message); }
+      // Auto-send ONLY for fresh cold outreach handled by the Cold Inbound agent when its autonomy
+      // is "auto" (the team flips this on in the Agents tab after writing its direction). Everything
+      // else — clients, ongoing threads — always drafts for human review.
+      const autoSend = !known && !isThread && agent.autonomy === 'auto';
+      if (DRY) {
+        console.log('   [DRY] would ' + (autoSend ? 'AUTO-SEND' : 'draft') + ' (' + res.reply.length + ' chars)');
+      } else if (autoSend) {
+        try { await graph(tok, 'POST', `/users/${ADDR}/messages/${m.id}/reply`, { comment: res.reply }); sent++; console.log('   ✉ auto-SENT cold reply'); }
+        catch (e) { console.error('   auto-send failed:', e.message); }
+      } else {
+        try { await graph(tok, 'POST', `/users/${ADDR}/messages/${m.id}/createReply`, { comment: res.reply }); drafted++; console.log('   ✓ draft reply created in Outlook'); }
+        catch (e) { console.error('   draft failed:', e.message); }
       }
     }
 
@@ -172,6 +177,6 @@ function parseJSON(txt) {
     await stateRef.set({ processed, lastRun: Date.now() }, { merge: true });
   }
 
-  console.log(`email agent ${DRY ? '(DRY) ' : ''}done — new=${msgs.length} drafted=${drafted} leads=${leadsMade} skipped=${skipped}`);
+  console.log(`email agent ${DRY ? '(DRY) ' : ''}done — new=${msgs.length} drafted=${drafted} sent=${sent} leads=${leadsMade} skipped=${skipped}`);
   process.exit(0);
 })().catch(e => { console.error('ERR', e.message); process.exit(1); });
