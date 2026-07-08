@@ -1,0 +1,33 @@
+name: Tannah business brief
+
+on:
+  schedule:
+    - cron: '0 22 * * *'   # ~6am Perth — fresh for the morning
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: offscript-tannah
+  cancel-in-progress: false
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Generate brief
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: node tannah-feed.js
+      - name: Commit if changed
+        run: |
+          git config user.name "offscript-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add feed/tannah-business.json
+          if git diff --staged --quiet; then echo "unchanged"; else git commit -m "chore: refresh Tannah business brief [skip ci]"; git push; fi

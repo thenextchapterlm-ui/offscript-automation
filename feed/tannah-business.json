@@ -1,0 +1,25 @@
+{
+  "news": [
+    {
+      "headline": "Together AI raises $800M Series C at $8.3B valuation",
+      "detail": "The AI infrastructure company, which lets enterprises train and run models on open-source platforms, reported over $1.15 billion in annual bookings with backing from Aramco Ventures, Nvidia, and Vista Equity.",
+      "source": "Tech Startups"
+    },
+    {
+      "headline": "Taktile secures $110M for agentic AI in finance",
+      "detail": "Goldman Sachs-led round backs the platform automating loan approvals, fraud detection, and claims processing for banks while preserving human oversight and audit trails in regulated workflows.",
+      "source": "Tech Startups"
+    },
+    {
+      "headline": "AI agents shift from hype to real workflows",
+      "detail": "Industry reports confirm 2026 marks the pivot from exploratory AI to measurable business outcomes, with companies now demanding concrete ROI metrics and deploying agents in mission-critical processes with proper governance.",
+      "source": "PwC"
+    },
+    {
+      "headline": "Bespoke Labs raises $40M for AI testing infrastructure",
+      "detail": "Wing VC-led Series A funds synthetic data generation and evaluation platforms that let AI agents safely learn through large-scale simulation before production deployment.",
+      "source": "Tech Startups"
+    }
+  ],
+  "updated": "8 July 2026"
+}
