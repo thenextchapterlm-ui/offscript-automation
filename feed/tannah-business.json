@@ -1,25 +1,25 @@
 {
   "news": [
     {
-      "headline": "Prime Intellect raises $130M Series A for AI",
-      "detail": "<cite index=\"2-3\">Prime Intellect closed a $130 million Series A led by Radical Ventures on July 8, 2026</cite>, showing strong investor appetite for AI infrastructure.",
-      "source": "startups.gallery"
-    },
-    {
-      "headline": "Quantum Systems secures $1.2B for defense tech",
-      "detail": "<cite index=\"7-8\">Quantum Systems raised $1.2 billion in Series D funding on July 2, 2026</cite>, signaling that European defense tech is attracting massive capital.",
+      "headline": "SambaNova raises $1B at $11B valuation",
+      "detail": "AI chip maker closed Series F just 5 months after last mega-round, highlighting how enterprise AI infrastructure attracts massive, rapid capital.",
       "source": "Tech Startups"
     },
     {
-      "headline": "Qualcomm acquires Modular for nearly $4B",
-      "detail": "<cite index=\"31-11\">Qualcomm announced plans to buy Modular for nearly $4 billion on June 26, 2026</cite>, demonstrating how AI infrastructure acquisitions are accelerating.",
-      "source": "Intellizence"
+      "headline": "Taktile secures $110M for agentic AI decisions",
+      "detail": "Goldman Sachs-led round backs platform automating workflows like loan approvals and fraud triage while preserving human oversight for regulated industries.",
+      "source": "Tech Startups"
     },
     {
-      "headline": "Agentic AI becomes enterprise's top 2026 priority",
-      "detail": "<cite index=\"18-5\">2026 is called the year for enterprise agentic AI, with companies deploying agents for marketing and workflows</cite>, marking a shift from passive to autonomous AI tools.",
-      "source": "TechTarget"
+      "headline": "General Intuition closes $320M gaming-data AGI bet",
+      "detail": "Bezos-backed startup valued at $2.3B uses gaming data to teach AI spatial reasoning, addressing LLMs' weakness in understanding physical movement.",
+      "source": "TechCrunch"
+    },
+    {
+      "headline": "Agentic AI moving from pilots to production",
+      "detail": "23% of organizations now scaling agentic AI systems with 39% experimenting, as AI agents autonomously handle multi-step workflows in enterprise settings.",
+      "source": "McKinsey"
     }
   ],
-  "updated": "9 July 2026"
+  "updated": "10 July 2026"
 }
