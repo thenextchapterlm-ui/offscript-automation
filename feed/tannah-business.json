@@ -1,25 +1,25 @@
 {
   "news": [
     {
-      "headline": "SambaNova raises $1B at $11B valuation",
-      "detail": "AI chip maker closed Series F just 5 months after last mega-round, highlighting how enterprise AI infrastructure attracts massive, rapid capital.",
+      "headline": "Taktile raises $110M for AI decision platform",
+      "detail": "<cite index=\"2-17,2-18\">NYC fintech Taktile secured $110M Series C from Goldman Sachs for an agentic decision platform automating loan approvals and fraud triage for banks.</cite>",
       "source": "Tech Startups"
     },
     {
-      "headline": "Taktile secures $110M for agentic AI decisions",
-      "detail": "Goldman Sachs-led round backs platform automating workflows like loan approvals and fraud triage while preserving human oversight for regulated industries.",
+      "headline": "Together AI closes $800M at $8.3B valuation",
+      "detail": "<cite index=\"3-3\">Together AI raised $800M Series C at an $8.3B valuation for its platform enabling enterprises to train and run AI on open-source models.</cite>",
       "source": "Tech Startups"
     },
     {
-      "headline": "General Intuition closes $320M gaming-data AGI bet",
-      "detail": "Bezos-backed startup valued at $2.3B uses gaming data to teach AI spatial reasoning, addressing LLMs' weakness in understanding physical movement.",
-      "source": "TechCrunch"
+      "headline": "Monogram raises $40M for voice-driven AI interfaces",
+      "detail": "<cite index=\"7-8,7-9\">Coursera co-founder Eren Bali's Monogram secured $40M seed from DST Global for an AI app generating interactive interfaces instead of text responses.</cite>",
+      "source": "Tech Startups"
     },
     {
-      "headline": "Agentic AI moving from pilots to production",
-      "detail": "23% of organizations now scaling agentic AI systems with 39% experimenting, as AI agents autonomously handle multi-step workflows in enterprise settings.",
+      "headline": "Agentic AI adoption accelerates across enterprises",
+      "detail": "<cite index=\"12-12\">23% of organizations are scaling agentic AI systems and 39% are experimenting with AI agents that autonomously handle multi-step workflows.</cite>",
       "source": "McKinsey"
     }
   ],
-  "updated": "10 July 2026"
+  "updated": "11 July 2026"
 }
