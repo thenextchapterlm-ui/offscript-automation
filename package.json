@@ -9,6 +9,7 @@
     "dry": "node notify.js --dry"
   },
   "dependencies": {
-    "firebase-admin": "^12.7.0"
+    "firebase-admin": "^12.7.0",
+    "node-ical": "^0.20.1"
   }
 }
