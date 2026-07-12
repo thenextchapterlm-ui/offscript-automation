@@ -1,25 +1,25 @@
 {
   "news": [
     {
-      "headline": "Taktile raises $110M for AI decision platform",
-      "detail": "<cite index=\"2-17,2-18\">NYC fintech Taktile secured $110M Series C from Goldman Sachs for an agentic decision platform automating loan approvals and fraud triage for banks.</cite>",
+      "headline": "Together AI raises $800M at $8.3B valuation",
+      "detail": "AI infrastructure company enabling enterprises to train and run models on open-source platforms secured Series C led by Aramco Ventures.",
       "source": "Tech Startups"
     },
     {
-      "headline": "Together AI closes $800M at $8.3B valuation",
-      "detail": "<cite index=\"3-3\">Together AI raised $800M Series C at an $8.3B valuation for its platform enabling enterprises to train and run AI on open-source models.</cite>",
+      "headline": "Norm AI hits $1.2B valuation with $120M round",
+      "detail": "Legal AI platform automating contract management and compliance for enterprises raised Series C from Khosla Ventures after building AI-native law firms.",
       "source": "Tech Startups"
     },
     {
-      "headline": "Monogram raises $40M for voice-driven AI interfaces",
-      "detail": "<cite index=\"7-8,7-9\">Coursera co-founder Eren Bali's Monogram secured $40M seed from DST Global for an AI app generating interactive interfaces instead of text responses.</cite>",
+      "headline": "Monogram raises $40M seed for visual AI interface",
+      "detail": "Coursera co-founder's new startup generates interactive user interfaces instead of text responses, backed by DST Global and Lux Capital.",
       "source": "Tech Startups"
     },
     {
-      "headline": "Agentic AI adoption accelerates across enterprises",
-      "detail": "<cite index=\"12-12\">23% of organizations are scaling agentic AI systems and 39% are experimenting with AI agents that autonomously handle multi-step workflows.</cite>",
+      "headline": "Agentic AI adoption accelerates across enterprises in 2026",
+      "detail": "Twenty-three percent of organizations now scaling AI agents that autonomously execute multi-step workflows, with IT and knowledge management leading deployment.",
       "source": "McKinsey"
     }
   ],
-  "updated": "11 July 2026"
+  "updated": "12 July 2026"
 }
