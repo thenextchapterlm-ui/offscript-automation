@@ -55,6 +55,9 @@ function daysBetween(a, b) { return Math.round((new Date(b) - new Date(a)) / 864
     (byPerson[who] = byPerson[who] || []).push(t.token);
   });
   const targetsFor = who => (who && byPerson[who] ? byPerson[who] : all);
+  // A task may be assigned to several people — notify all of them.
+  const asgsOf = t => (t.assignees && t.assignees.length) ? t.assignees : (t.assignee ? [t.assignee] : []);
+  const targetsForMany = arr => { if (!arr || !arr.length) return all; const s = new Set(); arr.forEach(w => (byPerson[w] || []).forEach(x => s.add(x))); return s.size ? [...s] : all; };
 
   // Dedupe map of already-sent events
   const sentRef = db.doc('notifications/sent');
@@ -77,7 +80,7 @@ function daysBetween(a, b) { return Math.round((new Date(b) - new Date(a)) / 864
       const when = new Date(t.remindAt);
       if (when <= now && (now - when) < LOOKBACK_DAYS * 86400000) {
         const key = 'remind:' + t.id + ':' + t.remindAt;
-        if (!sent[key]) queue.push({ key, tokens: targetsFor(t.assignee), title: '⏰ Reminder', body: t.title });
+        if (!sent[key]) queue.push({ key, tokens: targetsForMany(asgsOf(t)), title: '⏰ Reminder', body: t.title });
       }
     }
 
@@ -87,7 +90,7 @@ function daysBetween(a, b) { return Math.round((new Date(b) - new Date(a)) / 864
       if (!sent[key]) {
         const overdue = t.scheduledDate < today;
         queue.push({
-          key, tokens: targetsFor(t.assignee),
+          key, tokens: targetsForMany(asgsOf(t)),
           title: overdue ? '🔴 Overdue task' : '📌 Due today', body: t.title
         });
       }
