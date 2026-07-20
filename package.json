@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "firebase-admin": "^12.7.0",
-    "node-ical": "^0.20.1"
+    "node-ical": "^0.20.1",
+    "playwright": "^1.61.1"
   }
 }
