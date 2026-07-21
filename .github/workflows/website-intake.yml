@@ -1,0 +1,30 @@
+name: OFFscript website lead intake
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # every 5 min: ingest bookings, enrich from questionnaires, send delayed acks
+  workflow_dispatch:
+
+concurrency:
+  group: offscript-website-intake
+  cancel-in-progress: false
+
+jobs:
+  intake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install deps
+        run: npm ci --omit=dev || npm install --omit=dev
+      - name: Run website intake agent
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MS_TENANT_ID: ${{ secrets.MS_TENANT_ID }}
+          MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+          MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
+        run: node website-intake.js
