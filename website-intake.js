@@ -165,6 +165,8 @@ ${REPLY_PHONE}
 
   let tok = null; // lazy MS token (only if we actually send/draft)
   let leadsMade = 0, enriched = 0, notified = 0, acked = 0, skipped = 0;
+  const newActs = [];   // per-action history entries, prepended to the agent's activity log
+  const whenLabel = () => new Date().toLocaleString('en-AU', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 
   // helper: enrich a lead object from a questionnaire
   const applyQ = (lead, q) => {
@@ -204,6 +206,7 @@ ${REPLY_PHONE}
         applyQ(lead, q);
         if (!DRY) { pipe.leads.push(lead); pipeChanged = true; }
         leadsMade++;
+        newActs.unshift({ when: whenLabel(), text: `New lead at Call stage: ${lead.name}${lead.company ? ' / ' + lead.company : ''} (${lead.email})` });
         console.log(`${DRY ? '[DRY] ' : ''}+ lead (call stage): ${lead.name}${lead.company ? ' / ' + lead.company : ''} — ${lead.email}`);
       }
       // team ping: a call just got booked
@@ -229,6 +232,7 @@ ${REPLY_PHONE}
         applyQ(lead, q);
         if (!DRY) { pipeChanged = true; await db.doc('questionnaires/' + q.id).set({ ingested: true }, { merge: true }); }
         enriched++;
+        newActs.unshift({ when: whenLabel(), text: `Enriched lead from questionnaire: ${lead.name}${q.business ? ' / ' + q.business : ''}` });
         console.log(`${DRY ? '[DRY] ' : ''}~ enriched lead from questionnaire: ${lead.name} / ${q.business || ''}`);
       }
     }
@@ -256,6 +260,7 @@ ${REPLY_PHONE}
         } catch (e) { console.error('   ack ' + (autoSend ? 'send' : 'draft') + ' failed:', e.message); continue; }
       }
       acked++;
+      newActs.unshift({ when: whenLabel(), text: `${autoSend ? 'Sent' : 'Drafted'} acknowledgement to ${bk.name || bk.email} (${bk.email})` });
       console.log(`${DRY ? '[DRY] ' : ''}✉ ack ${autoSend ? 'sent' : 'drafted'} → ${bk.email}`);
     }
   }
@@ -266,7 +271,15 @@ ${REPLY_PHONE}
     const cutoff = now - 30 * 86400000;
     for (const k in sent) if (sent[k] < cutoff) delete sent[k];
     await sentRef.set({ keys: sent }, { merge: true });
-    await db.doc('agents/website-intake').set({ lastRun: now, status: 'active' }, { merge: true });
+    const upd = { lastRun: now, status: 'active' };
+    if (newActs.length) {
+      upd.activity = [...newActs, ...(agent.activity || [])].slice(0, 60);
+      const stats = agent.stats || { handled: 0, drafts: 0 };
+      stats.handled = (stats.handled || 0) + leadsMade;
+      stats.drafts = (stats.drafts || 0) + (autoSend ? 0 : acked);
+      upd.stats = stats;
+    }
+    await db.doc('agents/website-intake').set(upd, { merge: true });
   }
 
   console.log(`website-intake ${DRY ? '(DRY) ' : ''}done — leads=${leadsMade} enriched=${enriched} notified=${notified} acked=${acked} skipped=${skipped}`);

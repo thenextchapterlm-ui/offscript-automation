@@ -337,16 +337,26 @@ async function run() {
       log(`Wrote ${written} prospects (batch ${batchId}).`);
     }
 
+    const when = new Date().toLocaleString('en-AU', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+    const acts = (a.activity || []).slice();
+    acts.unshift({ when, text: `Scraped ${rows.length} prospects (${mxOk} email · ${withPhone} phone · ${chains} chains flagged) — ${niches.join('+')} within ${radiusM / 1000}km of ${location}` });
+    const stats = a.stats || { handled: 0, drafts: 0 };
+    stats.handled = (stats.handled || 0) + rows.length;
     await ref.set({
       runStatus: 'done',
       lastError: null,
       config: { ...cfg, lastRun: runAt, lastCount: rows.length },
+      stats,
+      activity: acts.slice(0, 60),
       updatedAt: Date.now(),
     }, { merge: true });
     log('Done.');
   } catch (e) {
     log('FAILED: ' + e.message);
-    await ref.set({ runStatus: 'error', lastError: String(e.message).slice(0, 300), updatedAt: Date.now() }, { merge: true });
+    const when = new Date().toLocaleString('en-AU', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+    const acts = (a.activity || []).slice();
+    acts.unshift({ when, text: 'Run failed: ' + String(e.message).slice(0, 140) });
+    await ref.set({ runStatus: 'error', lastError: String(e.message).slice(0, 300), activity: acts.slice(0, 60), updatedAt: Date.now() }, { merge: true });
     process.exitCode = 1;
   }
 }
