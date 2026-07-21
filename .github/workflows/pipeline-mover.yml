@@ -1,0 +1,29 @@
+name: OFFscript pipeline mover
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # every 10 min: advance leads from replies, bookings, completed tasks
+  workflow_dispatch:
+
+concurrency:
+  group: offscript-pipeline-mover
+  cancel-in-progress: false
+
+jobs:
+  move:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install deps
+        run: npm ci --omit=dev || npm install --omit=dev
+      - name: Run pipeline mover agent
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          MS_TENANT_ID: ${{ secrets.MS_TENANT_ID }}
+          MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+          MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
+        run: node pipeline-mover.js
