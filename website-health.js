@@ -120,9 +120,27 @@ async function checkDevice(browser, dev, issues, mediaSeen) {
     hasTouch: dev.hasTouch, deviceScaleFactor: dev.dsf,
   });
   const page = await ctx.newPage();
-  const consoleErrors = [], failedReq = [];
+  const consoleErrors = [], realFails = [], badResponses = [];
   page.on('console', m => { if (m.type() === 'error') consoleErrors.push(m.text().slice(0, 160)); });
-  page.on('requestfailed', r => failedReq.push(`${r.url().slice(0, 90)} (${(r.failure() || {}).errorText || 'failed'})`));
+  // Real failures only. This design-export bundle paints `{{ template }}` src placeholders
+  // into the DOM for a beat before its runtime swaps in real URLs, and the reel/logo
+  // carousels lazy-load + abort off-screen media — both fire ERR_ABORTED requests that are
+  // NOT breakage. Ignore those; keep genuine failures (DNS, refused, blocked).
+  page.on('requestfailed', r => {
+    const u = r.url(), err = (r.failure() || {}).errorText || 'failed';
+    if (err.includes('ERR_ABORTED')) return;
+    if (u.includes('%7B%7B') || u.includes('{{')) return;
+    realFails.push(`${u.slice(0, 90)} (${err})`);
+  });
+  // A real 4xx/5xx on one of OUR OWN assets is a genuine problem (missing file, etc.).
+  // Third-party embeds/analytics and template-placeholder URLs are ignored.
+  page.on('response', r => {
+    const st = r.status(), u = r.url();
+    if (st < 400 || st === 403 || st === 999) return;
+    if (!/offscriptcrew\.com\.au/.test(u)) return;
+    if (u.includes('%7B%7B') || u.includes('{{')) return;
+    badResponses.push(`${st} ${u.slice(0, 90)}`);
+  });
 
   const checks = [];
   const add = (name, st, detail, ms) => { checks.push({ name, status: st, detail: detail || '', ms: ms || 0 }); if (st === 'fail') issues.push({ device: dev.key, check: name, detail }); };
@@ -244,9 +262,11 @@ async function checkDevice(browser, dev, issues, mediaSeen) {
     }
   } catch (e) { add('Layout', 'warn', 'Layout check error: ' + e.message.slice(0, 60)); }
 
-  // 8. Console / failed requests
-  if (consoleErrors.length || failedReq.length) add('Console/assets', 'warn', `${consoleErrors.length} JS error(s), ${failedReq.length} failed request(s)`);
-  else add('Console/assets', 'pass', 'No JS errors or failed requests');
+  // 8. Console / failed requests (real breakage only — benign lazy/placeholder aborts ignored)
+  if (badResponses.length) add('Console/assets', 'fail', `${badResponses.length} broken own-asset(s): ${badResponses.slice(0, 2).join(', ')}`);
+  else if (realFails.length) add('Console/assets', 'warn', `${realFails.length} real failed request(s): ${realFails.slice(0, 2).join(', ')}`);
+  else if (consoleErrors.length) add('Console/assets', 'warn', `${consoleErrors.length} JS console error(s)`);
+  else add('Console/assets', 'pass', 'No real errors (benign lazy/placeholder aborts ignored)');
 
   // screenshot → Cloudinary
   let shot = null;
