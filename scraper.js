@@ -66,6 +66,27 @@ const NICHE_QUERIES = {
   ],
 };
 
+// Custom (keyword-based) lead types are defined in the UI and stored on
+// cfg.leadTypes as [{ key, name, keywords:[...] }]. Each is compiled into a
+// generic Overpass query that matches the keywords against a business name and
+// the common category tags. This keeps lead types editable without code changes.
+function escapeOverpass(s) { return String(s).trim().replace(/["\\]/g, '\\$&'); }
+
+function keywordFragmentsTemplate(keywords) {
+  const kws = (keywords || []).map(escapeOverpass).filter(Boolean);
+  if (!kws.length) return [];
+  const rx = kws.join('|');
+  return [
+    `nwr["name"~"${rx}",i]({around});`,
+    `nwr["shop"~"${rx}",i]({around});`,
+    `nwr["amenity"~"${rx}",i]({around});`,
+    `nwr["craft"~"${rx}",i]({around});`,
+    `nwr["healthcare"~"${rx}",i]({around});`,
+    `nwr["leisure"~"${rx}",i]({around});`,
+    `nwr["office"~"${rx}",i]({around});`,
+  ];
+}
+
 const KNOWN_CHAINS = new Set([
   'anytime fitness', 'f45', 'snap fitness', 'jetts', 'goodlife', 'fitness first',
   'plus fitness', 'world gym', 'fernwood', 'curves', 'bft', '12rnd',
@@ -225,6 +246,7 @@ async function run() {
     const location = (cfg.location || '').trim();
     const radiusM = Math.round((Number(cfg.radiusKm) || 15) * 1000);
     const niches = (cfg.niches && cfg.niches.length) ? cfg.niches : ['gyms', 'wellness'];
+    const customTypes = Array.isArray(cfg.leadTypes) ? cfg.leadTypes.filter(lt => lt && lt.key) : [];
     const incomeType = cfg.incomeType || 'any';
     const limit = Number(cfg.limit) || 50;
     if (!location) throw new Error('No location set');
@@ -233,18 +255,33 @@ async function run() {
     const { lat, lon } = await geocode(location);
     const around = `around:${radiusM},${lat},${lon}`;
 
-    const fragments = niches.flatMap(n => (NICHE_QUERIES[n] || []).map(f => f.replace('{around}', around)));
+    // built-in niches + compiled custom lead types, keyed the same way
+    const nicheMap = { ...NICHE_QUERIES };
+    for (const lt of customTypes) nicheMap[lt.key] = keywordFragmentsTemplate(lt.keywords);
+
+    const fragments = niches.flatMap(n => (nicheMap[n] || []).map(f => f.replace('{around}', around)));
     if (!fragments.length) throw new Error('No valid niches selected');
 
     log(`Querying OpenStreetMap: ${niches.join(', ')} within ${radiusM / 1000}km of ${lat.toFixed(3)},${lon.toFixed(3)}…`);
     const elements = await overpassQuery(fragments);
 
-    // vertical lookup: which niche each fragment came from (by re-tagging on parse)
+    // vertical lookup: which niche each element belongs to (re-tagging on parse).
+    // Only considers niches selected for this run; custom lead types are matched
+    // by keyword against the business name + category tags.
+    const selectedCustom = customTypes.filter(lt => niches.includes(lt.key));
     const nicheForTags = (t) => {
-      if (t.leisure === 'fitness_centre' || /fitness|crossfit|gym/i.test(t.sport || '')) return 'gyms';
-      if (/yoga|pilates/i.test(t.sport || '') || t.shop === 'massage' || /physio|alternative/i.test(t.healthcare || '')) return 'wellness';
-      if (/^(cafe|restaurant|bar|pub)$/.test(t.amenity || '')) return 'hospitality';
-      if (t.craft || /^(trade|doityourself)$/.test(t.shop || '')) return 'trades';
+      const has = (k) => niches.includes(k);
+      if (has('gyms') && (t.leisure === 'fitness_centre' || /fitness|crossfit|gym/i.test(t.sport || ''))) return 'gyms';
+      if (has('wellness') && (/yoga|pilates/i.test(t.sport || '') || t.shop === 'massage' || /physio|alternative/i.test(t.healthcare || ''))) return 'wellness';
+      if (has('hospitality') && /^(cafe|restaurant|bar|pub)$/.test(t.amenity || '')) return 'hospitality';
+      if (has('trades') && (t.craft || /^(trade|doityourself)$/.test(t.shop || ''))) return 'trades';
+      if (selectedCustom.length) {
+        const hay = [t.name, t.shop, t.amenity, t.craft, t.healthcare, t.leisure, t.sport, t.office]
+          .filter(Boolean).join(' ').toLowerCase();
+        for (const lt of selectedCustom) {
+          if ((lt.keywords || []).some(k => k && hay.includes(String(k).trim().toLowerCase()))) return lt.key;
+        }
+      }
       return niches[0];
     };
 
