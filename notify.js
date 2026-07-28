@@ -123,6 +123,50 @@ function daysBetween(a, b) { return Math.round((new Date(b) - new Date(a)) / 864
     }
   }
 
+  // ── SUBTASK (STEP) REQUESTS + "YOU'RE UP NEXT" ──
+  // Subtasks are the app's handoff mechanism: a sequence of steps that can each belong to a
+  // different person. Both of their signals were dead ends before - a step request was only
+  // visible if you opened that task, and the "you're up next" nudge was an in-app toast that
+  // only the person who ticked the box ever saw.
+  for (const t of tasks) {
+    if (t.archived) continue;
+    if (t.status === 'done' || t.done) continue;
+    const steps = t.subtasks || [];
+
+    for (const st of steps) {
+      // Someone asked you to own a step.
+      if (st.pendingAssignee) {
+        const key = 'stepask:' + t.id + ':' + st.id + ':' + st.pendingAssignee;
+        if (!sent[key]) {
+          queue.push({
+            key, tokens: targetsFor(st.pendingAssignee),
+            title: (st.askedBy ? st.askedBy + ' asked you to take a step' : 'New step request'),
+            body: (st.title || 'Step') + ' - on "' + (t.title || '') + '"',
+          });
+        }
+      }
+    }
+
+    // The next unfinished step after the last completed one: its owner is up.
+    const firstOpen = steps.findIndex(s => s.status !== 'done');
+    if (firstOpen > 0) {                                   // > 0 means something before it is done
+      const up = steps[firstOpen];
+      const owner = up.assignee;
+      if (owner) {
+        // Keyed on how many steps are done, so each completion nudges once and only once.
+        const doneCount = steps.filter(s => s.status === 'done').length;
+        const key = 'stepnext:' + t.id + ':' + up.id + ':' + doneCount;
+        if (!sent[key]) {
+          queue.push({
+            key, tokens: targetsFor(owner),
+            title: '⏭ You\'re up next',
+            body: (up.title || 'Next step') + ' - on "' + (t.title || '') + '"',
+          });
+        }
+      }
+    }
+  }
+
   // ── AGENT FAILURES ──
   // The Releases Feed sat marked "Last run failed" for 16 days and nobody saw it, because the only
   // place a broken agent shows up is the Agents tab. Failures now come to us. One ping per agent
