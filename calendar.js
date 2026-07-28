@@ -87,6 +87,24 @@ function addEvent(uid, item, summary) {
     });
   } catch (e) { /* events collection may not exist yet */ }
 
+  // TASKS with a due date. Previously the feed only carried shoots, meetings and follow-ups, so a
+  // dated task existed in the app and nowhere else - you had to open the app to know what was due.
+  // `dueTime` (added 2026-07-28) makes it a timed one-hour event; date only stays all-day.
+  // Done and archived tasks are skipped: a calendar should show what's still coming.
+  try {
+    const tdoc = await db.doc('boards/tasks').get();
+    let tasks = [];
+    if (tdoc.exists) { try { tasks = JSON.parse(tdoc.data().json).tasks || []; } catch (e) {} }
+    tasks.forEach(t => {
+      if (t.archived || t.status === 'done' || t.done) return;
+      if (!t.scheduledDate) return;
+      const who = (t.assignees && t.assignees.length) ? t.assignees.join(' & ') : (t.assignee || '');
+      addEvent('task-' + t.id,
+        { date: t.scheduledDate, time: t.dueTime || '' },
+        (t.title || 'Task') + (who ? ' — ' + who : ''));
+    });
+  } catch (e) { console.error('tasks -> calendar failed:', e.message); }
+
   lines.push('END:VCALENDAR');
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
   fs.writeFileSync(OUT, lines.join('\r\n') + '\r\n');
