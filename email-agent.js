@@ -31,6 +31,23 @@ const db = getFirestore();
 
 const AUTOMATED = /(noreply|no-reply|donotreply|do-not-reply|mailer-daemon|postmaster|notifications?@|@microsoft\.com|@email\.microsoft|@.*\.microsoftonline|@mail\.instagram|@facebookmail|@linkedin\.com|@bounce)/i;
 
+// Us - never counted as outreach when they turn up as a recipient.
+const TEAM_ADDRS = new Set([
+  'admin@offscriptcrew.com.au', 'luca@thenextchapterau.com', 'lucavk12@gmail.com',
+  'mileswineera@gmail.com', 'hello@offscriptcrew.com.au'
+]);
+
+// Brisbane is UTC+10 all year (no DST), and the Outreach metric is a WEEKLY one, so the count has
+// to start from Monday 00:00 Brisbane - not from the runner's UTC midnight, which would roll the
+// week over 10 hours early and blank the number every Sunday evening our time.
+function brisbaneWeekStartISO() {
+  const OFF = 10 * 3600000;
+  const nowB = new Date(Date.now() + OFF);
+  const dow = (nowB.getUTCDay() + 6) % 7;   // 0 = Monday
+  const startB = Date.UTC(nowB.getUTCFullYear(), nowB.getUTCMonth(), nowB.getUTCDate() - dow, 0, 0, 0);
+  return new Date(startB - OFF).toISOString();
+}
+
 async function msToken() {
   const body = new URLSearchParams({ client_id: CLIENT, client_secret: SECRET, scope: 'https://graph.microsoft.com/.default', grant_type: 'client_credentials' });
   const r = await fetch(`https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`, { method: 'POST', body });
@@ -63,6 +80,59 @@ function parseJSON(txt) {
   const m = txt.match(/\{[\s\S]*\}/);
   if (!m) return null;
   try { return JSON.parse(m[0]); } catch (e) { return null; }
+}
+
+// ── OUTREACH COUNTER ────────────────────────────────────────────────────────────────────────
+// Walks Sent Items for the current (Brisbane) week and counts DISTINCT external people we
+// emailed. Definition, deliberately: one prospect = one outreach no matter how many mails or
+// follow-ups they got that week, existing clients don't count (the goal is "100 CLIENT OUTREACH
+// per week" = new businesses contacted), and automated/internal addresses are dropped. Change the
+// dedupe here if you'd rather count sends than people.
+async function countOutreach(tok, clientEmails) {
+  const since = brisbaneWeekStartISO();
+  let url = 'https://graph.microsoft.com/v1.0/users/' + ADDR + '/mailFolders/sentitems/messages'
+    + '?$filter=sentDateTime ge ' + since
+    + '&$select=id,subject,toRecipients,sentDateTime&$top=100';
+  const people = new Set();
+  let scanned = 0, pages = 0;
+  while (url && pages < 12) {                       // hard cap: 1200 sent messages a week is plenty
+    const r = await fetch(url, { headers: { Authorization: 'Bearer ' + tok } });
+    const j = await r.json();
+    if (!r.ok) throw new Error('graph sentitems: ' + JSON.stringify(j).slice(0, 160));
+    for (const m of (j.value || [])) {
+      scanned++;
+      for (const rcp of (m.toRecipients || [])) {
+        const a = ((rcp.emailAddress && rcp.emailAddress.address) || '').toLowerCase().trim();
+        if (!a || TEAM_ADDRS.has(a)) continue;
+        if (a.endsWith('@offscriptcrew.com.au')) continue;
+        if (AUTOMATED.test(a)) continue;
+        if (clientEmails.has(a)) continue;          // already a client - that's account mail, not outreach
+        people.add(a);
+      }
+    }
+    url = j['@odata.nextLink'] || null;
+    pages++;
+  }
+  return { count: people.size, scanned, since };
+}
+
+// Push the count onto the Outreach metric in boards/command (the card the app shows on Home).
+// `source` is flipped off 'manual' so (a) the app stops offering +/- on a number a bot owns and
+// (b) the app's weekly reset leaves it alone - we recompute the true week-to-date figure every
+// run anyway, so a reset would only ever create a wrong number between runs.
+async function syncOutreachMetric(count) {
+  const ref = db.doc('boards/command');
+  const snap = await ref.get();
+  if (!snap.exists) return null;
+  let state; try { state = JSON.parse(snap.data().json || '{}'); } catch (e) { return null; }
+  const metric = (state.metrics || []).find(m => /outreach/i.test(m.label || ''));
+  if (!metric) return null;
+  const before = metric.value || 0;
+  metric.value = count;
+  metric.source = 'email';
+  metric.autoAt = Date.now();
+  await ref.set({ json: JSON.stringify(state) }, { merge: true });
+  return { before, after: count, target: metric.target || 0 };
 }
 
 (async () => {
@@ -169,6 +239,33 @@ function parseJSON(txt) {
     if (!DRY) processed[m.id] = Date.now();
   }
 
+  // ── Outreach goal ──────────────────────────────────────────────────────────
+  // Independent of the inbox pass above: this runs every time (even when there's no new mail),
+  // because the number has to keep up with what WE send, not with what arrives. Never fatal -
+  // a Graph hiccup here must not cost us the inbox work already done above.
+  let outreach = null;
+  try {
+    const clientEmails = new Set(Object.keys(clientByEmail));
+    outreach = await countOutreach(tok, clientEmails);
+    console.log(`outreach: ${outreach.count} distinct prospects emailed since ${outreach.since} (${outreach.scanned} sent messages scanned)`);
+    if (!DRY) {
+      const res = await syncOutreachMetric(outreach.count);
+      if (res) {
+        console.log(`   → Outreach metric ${res.before} → ${res.after}${res.target ? ' / ' + res.target : ''}`);
+        if (res.before !== res.after) {
+          const aRef = db.doc('agents/email-responder');
+          const aDoc = await aRef.get();
+          const acts = ((aDoc.exists && aDoc.data().activity) || []).slice();
+          const when = new Date().toLocaleString('en-AU', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+          acts.unshift({ when, text: `Outreach goal updated: ${res.after}${res.target ? ' / ' + res.target : ''} prospects emailed this week` });
+          await aRef.set({ activity: acts.slice(0, 60), updatedAt: Date.now() }, { merge: true });
+        }
+      } else {
+        console.log('   → no Outreach metric found in boards/command - nothing to update');
+      }
+    }
+  } catch (e) { console.error('outreach count failed:', e.message); }
+
   if (!DRY) {
     if (pipeChanged) await pipeRef.set({ json: JSON.stringify(pipe) }, { merge: true });
     // prune processed markers older than 30 days
@@ -177,6 +274,6 @@ function parseJSON(txt) {
     await stateRef.set({ processed, lastRun: Date.now() }, { merge: true });
   }
 
-  console.log(`email agent ${DRY ? '(DRY) ' : ''}done — new=${msgs.length} drafted=${drafted} sent=${sent} leads=${leadsMade} skipped=${skipped}`);
+  console.log(`email agent ${DRY ? '(DRY) ' : ''}done — new=${msgs.length} drafted=${drafted} sent=${sent} leads=${leadsMade} skipped=${skipped} outreach=${outreach ? outreach.count : 'n/a'}`);
   process.exit(0);
 })().catch(e => { console.error('ERR', e.message); process.exit(1); });
