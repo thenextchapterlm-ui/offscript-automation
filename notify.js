@@ -97,6 +97,61 @@ function daysBetween(a, b) { return Math.round((new Date(b) - new Date(a)) / 864
     }
   }
 
+  // ── TASK ASSIGNMENT REQUESTS ──
+  // You can't put someone else on a task; you ASK, and it sits in `pendingAssignees` until they
+  // accept. That request was only visible if they happened to open the in-app notifications panel,
+  // which meant work could sit unanswered for days. Now it reaches their phone. No DAILY_HOUR gate:
+  // someone is actively waiting on the answer, so this goes out as soon as it's seen (<=5 min).
+  for (const t of tasks) {
+    if (t.archived) continue;
+    if (t.status === 'done' || t.done) continue;
+    const asked = (t.pendingAssignees && t.pendingAssignees.length)
+      ? t.pendingAssignees
+      : (t.offeredTo ? [t.offeredTo] : []);
+    for (const who of asked) {
+      if (!who) continue;
+      // Key includes the person, so a second person asked later still gets their own ping, and
+      // an ask -> decline -> re-ask cycle notifies again (the key changes with the request stamp).
+      const key = 'ask:' + t.id + ':' + who + ':' + (t.invitedBy || '');
+      if (sent[key]) continue;
+      const from = t.invitedBy || t.createdBy || '';
+      queue.push({
+        key, tokens: targetsFor(who),
+        title: from ? `🤝 ${from} asked you to take this on` : '🤝 New task request',
+        body: t.title,
+      });
+    }
+  }
+
+  // ── AGENT FAILURES ──
+  // The Releases Feed sat marked "Last run failed" for 16 days and nobody saw it, because the only
+  // place a broken agent shows up is the Agents tab. Failures now come to us. One ping per agent
+  // per day (the key carries the date) so a permanently broken agent nags daily instead of every
+  // 5 minutes, and stays visible until it's actually fixed.
+  const agentAlerts = [];
+  try {
+    const localSnap = await db.collection('localAgents').get();
+    localSnap.forEach(d => {
+      const a = d.data() || {};
+      if (a.state === 'error') agentAlerts.push({ id: d.id, why: a.status || 'Last run failed' });
+    });
+  } catch (e) { console.error('localAgents read failed', e.message); }
+  try {
+    const agentSnap = await db.collection('agents').get();
+    agentSnap.forEach(d => {
+      const a = d.data() || {};
+      if (a.enabled && (a.runStatus === 'error' || a.lastError)) {
+        agentAlerts.push({ id: d.id, why: String(a.lastError || 'Run failed').slice(0, 120) });
+      }
+    });
+  } catch (e) { console.error('agents read failed', e.message); }
+
+  for (const a of agentAlerts) {
+    const key = 'agentfail:' + a.id + ':' + today;
+    if (sent[key]) continue;
+    queue.push({ key, tokens: all, title: '⚠️ Agent stopped working', body: a.id + ' - ' + a.why });
+  }
+
   // ── CLIENT FOLLOW-UPS ──
   const cliSnap = await db.collection('clients').get();
   cliSnap.forEach(d => {
