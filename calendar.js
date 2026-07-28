@@ -57,10 +57,18 @@ function addEvent(uid, item, summary) {
   lines.push('DTSTAMP:' + stamp());
   if (item.time) {
     lines.push('DTSTART:' + ymd(item.date) + 'T' + item.time.replace(':', '') + '00');
-    lines.push('DTEND:' + plusHour(item.date, item.time));
+    // A real end when the item has one (tasks gained Starts/Ends on 2026-07-28); shoots, meetings
+    // and anything else without an explicit end keep the one-hour default.
+    if (item.endTime) {
+      lines.push('DTEND:' + ymd(item.endDate || item.date) + 'T' + item.endTime.replace(':', '') + '00');
+    } else {
+      lines.push('DTEND:' + plusHour(item.date, item.time));
+    }
   } else {
     lines.push('DTSTART;VALUE=DATE:' + ymd(item.date));
-    lines.push('DTEND;VALUE=DATE:' + nextDay(item.date));
+    // All-day spanning several days: DTEND is exclusive in iCalendar, so it's the day AFTER the
+    // last one. A single-day item is still start -> next day.
+    lines.push('DTEND;VALUE=DATE:' + nextDay(item.endDate && item.endDate > item.date ? item.endDate : item.date));
   }
   lines.push(fold('SUMMARY:' + esc(summary)));
   lines.push('END:VEVENT');
@@ -100,7 +108,12 @@ function addEvent(uid, item, summary) {
       if (!t.scheduledDate) return;
       const who = (t.assignees && t.assignees.length) ? t.assignees.join(' & ') : (t.assignee || '');
       addEvent('task-' + t.id,
-        { date: t.scheduledDate, time: t.dueTime || '' },
+        {
+          date: t.scheduledDate,
+          time: t.allDay ? '' : (t.startTime || t.dueTime || ''),   // dueTime = pre-Starts/Ends tasks
+          endDate: t.endDate || '',
+          endTime: t.allDay ? '' : (t.endTime || ''),
+        },
         (t.title || 'Task') + (who ? ' — ' + who : ''));
     });
   } catch (e) { console.error('tasks -> calendar failed:', e.message); }
