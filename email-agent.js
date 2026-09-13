@@ -147,6 +147,14 @@ async function syncOutreachMetric(count) {
   const clients = clientsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
   const clientByEmail = {};
   clients.forEach(c => { if (c.email) clientByEmail[c.email.toLowerCase().trim()] = c; });
+  // The Command app's client book is the source of truth now. The old list above is still read,
+  // so a past client emailing in is never mistaken for a cold prospect.
+  try {
+    (await db.collection('appClients').get()).forEach(d => {
+      const c = d.data() || {}; const e = String(c.email || '').toLowerCase().trim();
+      if (e && !clientByEmail[e]) clientByEmail[e] = { id: d.id, business: c.name, name: c.name, type: 'client' };
+    });
+  } catch (e) { console.error('appClients read failed:', e.message); }
 
   // Processed state
   const stateRef = db.doc('automation/emailState');
@@ -162,13 +170,14 @@ async function syncOutreachMetric(count) {
   const msgs = (list.value || []).filter(m => !processed[m.id]);
   let drafted = 0, sent = 0, leadsMade = 0, skipped = 0;
 
-  // Pipeline (for lead creation)
-  const pipeRef = db.doc('boards/pipeline');
-  const pipeDoc = await pipeRef.get();
-  let pipe = { leads: [] };
-  if (pipeDoc.exists) { try { pipe = JSON.parse(pipeDoc.data().json); } catch (e) {} }
-  if (!pipe.leads) pipe.leads = [];
-  let pipeChanged = false;
+  // Leads land on the Command app's Outreach board (appLeads), reconnected 2026-09-13 - they used
+  // to go into the old dashboard's boards/pipeline. Emails already on the board are loaded once so a
+  // second message from the same prospect never makes a second card. If that read fails, no lead
+  // is created this run at all: a missed card is fixed next run, a duplicate is not.
+  const leadEmails = new Set();
+  let leadsReadable = true;
+  try { (await db.collection('appLeads').get()).forEach(d => { const e = String((d.data() || {}).email || '').toLowerCase().trim(); if (e) leadEmails.add(e); }); }
+  catch (e) { leadsReadable = false; console.error('appLeads read failed - no leads this run:', e.message); }
 
   for (const m of msgs) {
     const fromAddr = ((m.from && m.from.emailAddress && m.from.emailAddress.address) || '').toLowerCase().trim();
@@ -219,20 +228,17 @@ async function syncOutreachMetric(count) {
       }
     }
 
-    // Cold genuine prospect → create a pipeline lead (if not already present)
-    if (!known && res.category === 'prospect') {
-      const exists = pipe.leads.some(l => (l.email || '').toLowerCase() === fromAddr);
-      if (!exists) {
-        if (DRY) { console.log('   [DRY] would create pipeline lead:', res.name || fromName); }
-        else {
-          pipe.leads.push({
-            id: Date.now().toString(36) + Math.random().toString(36).slice(2,5),
-            name: res.name || fromName, company: res.company || '', email: fromAddr,
-            stage: 'replied', notes: 'Auto-added from inbound email: ' + (m.subject || ''),
-            addedAt: new Date().toISOString(), source: 'email-agent'
-          });
-          pipeChanged = true; leadsMade++;
-        }
+    // Cold genuine prospect → a card in the LEAD column on Outreach, once per email address.
+    if (!known && res.category === 'prospect' && leadsReadable && !leadEmails.has(fromAddr)) {
+      const id = 'em_' + fromAddr.replace(/[^a-z0-9]+/g, '_').slice(0, 80);
+      if (DRY) { console.log('   [DRY] would create Outreach lead:', res.name || fromName); }
+      else {
+        await db.doc('appLeads/' + id).set({
+          id, name: res.name || fromName, company: res.company || '', email: fromAddr, phone: '',
+          stage: 'LEAD', source: 'email', assignedTo: '', slot: '', slotLabel: '',
+          note: 'Emailed in: ' + (m.subject || '(no subject)'), at: Date.now(), updatedBy: 'email-agent',
+        }, { merge: true });
+        leadEmails.add(fromAddr); leadsMade++;
       }
     }
 
@@ -250,6 +256,11 @@ async function syncOutreachMetric(count) {
     console.log(`outreach: ${outreach.count} distinct prospects emailed since ${outreach.since} (${outreach.scanned} sent messages scanned)`);
     if (!DRY) {
       const res = await syncOutreachMetric(outreach.count);
+      // The Command app has no metrics board; it reads the week's number off the agent itself.
+      // The target stays where Miles set it (the old Outreach metric) and is only carried across.
+      await db.doc('agents/email-responder').set({
+        outreach: { count: outreach.count, target: (res && res.target) || null, since: outreach.since, at: Date.now() },
+      }, { merge: true });
       if (res) {
         console.log(`   → Outreach metric ${res.before} → ${res.after}${res.target ? ' / ' + res.target : ''}`);
         if (res.before !== res.after) {
@@ -267,7 +278,6 @@ async function syncOutreachMetric(count) {
   } catch (e) { console.error('outreach count failed:', e.message); }
 
   if (!DRY) {
-    if (pipeChanged) await pipeRef.set({ json: JSON.stringify(pipe) }, { merge: true });
     // prune processed markers older than 30 days
     const cutoff = Date.now() - 30 * 86400000;
     for (const k in processed) if (processed[k] < cutoff) delete processed[k];

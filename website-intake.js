@@ -24,7 +24,7 @@
  */
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
-const { getMessaging } = require('firebase-admin/messaging');
+const { seatsWithPage, sendToSeats } = require('./command');
 
 const DRY = process.argv.includes('--dry');
 const ADDR = 'admin@offscriptcrew.com.au';
@@ -148,17 +148,13 @@ ${REPLY_PHONE}
   const qByLead = {};
   qSnap.forEach(d => { const q = d.data(); if (q.leadId) qByLead[q.leadId] = { id: d.id, ...q }; });
 
-  // 2) Pipeline board (stored as a JSON string on boards/pipeline)
-  const pipeRef = db.doc('boards/pipeline');
-  const pipeDoc = await pipeRef.get();
-  let pipe = { leads: [] };
-  if (pipeDoc.exists) { try { pipe = JSON.parse(pipeDoc.data().json); } catch (e) {} }
-  if (!pipe.leads) pipe.leads = [];
-  let pipeChanged = false;
+  // 2) Cards on the Command app's Outreach board (appLeads), reconnected 2026-09-13 from the old
+  //    dashboard's boards/pipeline. A booking's card is appLeads/bk_<bookingId> - the SAME id
+  //    functions/index.js onBookingCreated writes - so the two can never make two cards for one call.
+  const pipe = { leads: (await db.collection('appLeads').get()).docs.map(d => Object.assign({ id: d.id }, d.data())) };
 
-  // Team push tokens
-  const tokSnap = await db.collection('pushTokens').get();
-  const allTokens = []; tokSnap.forEach(d => { const t = d.data(); if (t.token) allTokens.push(t.token); });
+  // Who hears about a booked call: the seats that have the Outreach page.
+  const outreachSeats = await seatsWithPage(db, 'outreach');
   const sentRef = db.doc('notifications/sent');
   const sentDoc = await sentRef.get();
   const sent = sentDoc.exists ? (sentDoc.data().keys || {}) : {};
@@ -193,18 +189,18 @@ ${REPLY_PHONE}
     if (!bk.ingested) {
       if (ageMs > INGEST_MAX_AGE_DAYS * 86400000) { skipped++; continue; }
       const email = (bk.email || '').toLowerCase().trim();
-      let lead = pipe.leads.find(l => email && (l.email || '').toLowerCase() === email && l.source === 'website-intake');
+      let lead = pipe.leads.find(l => l.id === 'bk_' + bk.id)
+        || pipe.leads.find(l => email && (l.email || '').toLowerCase() === email && l.stage === 'CALL BOOKED');
       if (!lead) {
         lead = {
-          id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+          id: 'bk_' + bk.id,
           name: bk.name || 'Website booking', company: (q && q.business) || '', email: bk.email || '',
-          phone: bk.phone || '', stage: 'call',
-          notes: 'Booked a discovery call via the website for ' + (bk.slotLabel || bk.slot || 'a time') + '.',
-          bookingId: bk.id, slot: bk.slot || '', slotLabel: bk.slotLabel || '',
-          addedAt: new Date().toISOString(), source: 'website-intake'
+          phone: bk.phone || '', stage: 'CALL BOOKED', source: 'website', assignedTo: bk.assignedTo || '',
+          note: 'Booked a discovery call via the website for ' + (bk.slotLabel || bk.slot || 'a time') + '.',
+          slot: bk.slot || '', slotLabel: bk.slotLabel || '', at: Date.now(),
         };
         applyQ(lead, q);
-        if (!DRY) { pipe.leads.push(lead); pipeChanged = true; }
+        if (!DRY) { await db.doc('appLeads/' + lead.id).set(lead, { merge: true }); pipe.leads.push(lead); }
         leadsMade++;
         newActs.unshift({ when: whenLabel(), text: `New lead at Call stage: ${lead.name}${lead.company ? ' / ' + lead.company : ''} (${lead.email})` });
         console.log(`${DRY ? '[DRY] ' : ''}+ lead (call stage): ${lead.name}${lead.company ? ' / ' + lead.company : ''} — ${lead.email}`);
@@ -212,25 +208,23 @@ ${REPLY_PHONE}
       // team ping: a call just got booked
       const key = 'booking:' + bk.id;
       if (!sent[key]) {
-        if (allTokens.length && !DRY) {
-          try {
-            await getMessaging().sendEachForMulticast({
-              tokens: [...new Set(allTokens)],
-              data: { title: '📅 Discovery call booked', body: (bk.name || 'Someone') + ' — ' + (bk.slotLabel || ''), url: '/' },
-              webpush: { headers: { Urgency: 'high', TTL: '3600' }, fcmOptions: { link: '/' } }
-            });
-          } catch (e) { console.error('   push failed:', e.message); }
-        }
+        if (!DRY) await sendToSeats(db, outreachSeats, 'Discovery call booked', (bk.name || 'Someone') + (bk.slotLabel ? ' - ' + bk.slotLabel : ''), '/app/#outreach');
         sent[key] = now; notified++;
         console.log(`${DRY ? '[DRY] ' : ''}  → team notified: call booked (${bk.name})`);
       }
       if (!DRY) await db.doc('bookings/' + bk.id).set({ ingested: true, leadId: (lead && lead.id) || null, ingestedAt: now }, { merge: true });
     } else if (q && !q._enrichedMarked) {
       // 3b) Late-arriving questionnaire for an already-ingested booking → enrich the lead.
-      const lead = pipe.leads.find(l => l.bookingId === bk.id || (l.email && bk.email && l.email.toLowerCase() === bk.email.toLowerCase()));
+      const lead = pipe.leads.find(l => l.id === 'bk_' + bk.id)
+        || pipe.leads.find(l => l.email && bk.email && l.email.toLowerCase() === bk.email.toLowerCase());
       if (lead && (!lead.questionnaire || !lead.questionnaire.filled)) {
         applyQ(lead, q);
-        if (!DRY) { pipeChanged = true; await db.doc('questionnaires/' + q.id).set({ ingested: true }, { merge: true }); }
+        if (!DRY) {
+          // Only the questionnaire's own fields, so a note someone typed on the card is never overwritten.
+          await db.doc('appLeads/' + lead.id).set({ company: lead.company || '', niche: lead.niche || '', handle: lead.handle || '',
+            locationText: lead.locationText || '', questionnaire: lead.questionnaire, updatedBy: 'website-intake' }, { merge: true });
+          await db.doc('questionnaires/' + q.id).set({ ingested: true }, { merge: true });
+        }
         enriched++;
         newActs.unshift({ when: whenLabel(), text: `Enriched lead from questionnaire: ${lead.name}${q.business ? ' / ' + q.business : ''}` });
         console.log(`${DRY ? '[DRY] ' : ''}~ enriched lead from questionnaire: ${lead.name} / ${q.business || ''}`);
@@ -267,7 +261,6 @@ ${REPLY_PHONE}
 
   // 4) Persist
   if (!DRY) {
-    if (pipeChanged) await pipeRef.set({ json: JSON.stringify(pipe) }, { merge: true });
     const cutoff = now - 30 * 86400000;
     for (const k in sent) if (sent[k] < cutoff) delete sent[k];
     await sentRef.set({ keys: sent }, { merge: true });

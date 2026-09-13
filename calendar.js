@@ -1,19 +1,31 @@
 /**
- * OFFscript calendar feed generator.
- * Reads shoot days, meetings and client follow-ups from Firestore and writes an
- * .ics feed that Google/Apple Calendar can subscribe to. Run by GitHub Actions;
- * the file is committed to the repo and served over its raw URL.
+ * OFFscript calendar feed generator (GitHub Actions, every 15 min).
  *
- * Times are emitted as "floating" local times (no timezone) so they show at the
- * wall-clock time on whatever device is viewing — simplest correct behaviour for a
- * single team. All-day when no time is given.
+ * Reconnected to OFFscript Command (2026-09-13). It used to read the old dashboard -
+ * client shootDays/meetings, standalone events and the boards/tasks blob - none of which
+ * the team writes any more. It now publishes what the Command app's studio calendar shows:
+ *
+ *   - shoots        appProjects with isShoot: the day it happens, at its call time if one was set
+ *   - meetings      appProjects with isMeeting: start, and endTime or one hour, as the app does
+ *   - project dues  any project's `due` date, all-day, like the app's calendar
+ *   - tasks         appTasks with a readable due date that are not done
+ *
+ * Times: the app stores everything in studio time (Australia/Brisbane, UTC+10, no daylight
+ * saving). The old feed wrote "floating" local times, which put a 10:00 Brisbane meeting at
+ * 10:00 in Rome on Stefano's phone. These are written in UTC, so every device shows the
+ * moment on its own clock.
+ *
+ * The file is committed to a PUBLIC repository and served over its raw URL: anyone with the
+ * link can read every title in it. That was true of the old feed as well.
  */
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const fs = require('fs');
 const path = require('path');
+const { brisbaneParts, dayOf, timeOf } = require('./command');
 
 const OUT = process.env.CAL_OUT || path.join(__dirname, 'feed', 'offscript-cal-8x3f.ics');
+const STUDIO_OFFSET_H = 10;   // Brisbane: UTC+10 all year
 
 function loadCreds() {
   if (process.env.FIREBASE_SERVICE_ACCOUNT) return JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -23,104 +35,74 @@ function loadCreds() {
 initializeApp({ credential: cert(loadCreds()), projectId: 'offscript-platform-8deb4' });
 const db = getFirestore();
 
-const pad = n => String(n).padStart(2, '0');
-function stamp() {
-  const d = new Date();
-  return d.getUTCFullYear() + pad(d.getUTCMonth()+1) + pad(d.getUTCDate()) + 'T' +
-         pad(d.getUTCHours()) + pad(d.getUTCMinutes()) + pad(d.getUTCSeconds()) + 'Z';
-}
-function esc(s) { return String(s == null ? '' : s).replace(/\\/g,'\\\\').replace(/;/g,'\\;').replace(/,/g,'\\,').replace(/\r?\n/g,'\\n'); }
+const pad = (n) => String(n).padStart(2, '0');
+const stampOf = (d) => d.getUTCFullYear() + pad(d.getUTCMonth() + 1) + pad(d.getUTCDate()) + 'T' + pad(d.getUTCHours()) + pad(d.getUTCMinutes()) + pad(d.getUTCSeconds()) + 'Z';
+const esc = (s) => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/;/g, '\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
 function fold(line) {
-  // RFC5545: lines longer than 75 octets should be folded
   if (line.length <= 74) return line;
   let out = line.slice(0, 74); let rest = line.slice(74);
   while (rest.length) { out += '\r\n ' + rest.slice(0, 73); rest = rest.slice(73); }
   return out;
 }
-function ymd(dateStr) { return dateStr.replace(/-/g, ''); }
-function nextDay(dateStr) { const d = new Date(dateStr + 'T00:00:00'); d.setDate(d.getDate()+1); return d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate()); }
-function plusHour(dateStr, timeStr) {
-  const [h, m] = timeStr.split(':').map(Number);
-  const d = new Date(dateStr + 'T00:00:00'); d.setHours(h+1, m || 0, 0, 0);
-  return d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'T'+pad(d.getHours())+pad(d.getMinutes())+'00';
+/* Studio date + HH:MM -> a UTC instant. */
+function studioInstant(iso, hhmm) {
+  const [y, mo, d] = iso.split('-').map(Number);
+  const [h, mi] = hhmm.split(':').map(Number);
+  return new Date(Date.UTC(y, mo - 1, d, h - STUDIO_OFFSET_H, mi, 0));
 }
+const ymd = (iso) => iso.replace(/-/g, '');
+function nextDay(iso) { const t = new Date(Date.parse(iso + 'T00:00:00Z') + 86400000); return t.getUTCFullYear() + pad(t.getUTCMonth() + 1) + pad(t.getUTCDate()); }
+const hhmmToMin = (s) => { const m = String(s || '').match(/^(\d{1,2}):(\d{2})/); return m ? (+m[1]) * 60 + (+m[2]) : null; };
 
-const lines = [
-  'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//OFFscript//Platform//EN',
-  'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:OFFscript', 'X-WR-CALDESC:Shoots, meetings & follow-ups'
-];
+const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//OFFscript//Command//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
+  'X-WR-CALNAME:OFFscript', 'X-WR-CALDESC:Shoots, meetings and what is due', 'X-WR-TIMEZONE:Australia/Brisbane'];
 let count = 0;
-function addEvent(uid, item, summary) {
-  if (!item.date) return;
-  lines.push('BEGIN:VEVENT');
-  lines.push('UID:' + uid + '@offscript');
-  lines.push('DTSTAMP:' + stamp());
-  if (item.time) {
-    lines.push('DTSTART:' + ymd(item.date) + 'T' + item.time.replace(':', '') + '00');
-    // A real end when the item has one (tasks gained Starts/Ends on 2026-07-28); shoots, meetings
-    // and anything else without an explicit end keep the one-hour default.
-    if (item.endTime) {
-      lines.push('DTEND:' + ymd(item.endDate || item.date) + 'T' + item.endTime.replace(':', '') + '00');
-    } else {
-      lines.push('DTEND:' + plusHour(item.date, item.time));
-    }
+const now = new Date();
+
+function addEvent(uid, date, time, endMin, summary) {
+  if (!date) return;
+  lines.push('BEGIN:VEVENT', 'UID:' + uid + '@offscript', 'DTSTAMP:' + stampOf(now));
+  if (time) {
+    const start = studioInstant(date, time);
+    const lenMin = endMin != null ? Math.max(15, endMin - hhmmToMin(time)) : 60;
+    lines.push('DTSTART:' + stampOf(start), 'DTEND:' + stampOf(new Date(start.getTime() + lenMin * 60000)));
   } else {
-    lines.push('DTSTART;VALUE=DATE:' + ymd(item.date));
-    // All-day spanning several days: DTEND is exclusive in iCalendar, so it's the day AFTER the
-    // last one. A single-day item is still start -> next day.
-    lines.push('DTEND;VALUE=DATE:' + nextDay(item.endDate && item.endDate > item.date ? item.endDate : item.date));
+    lines.push('DTSTART;VALUE=DATE:' + ymd(date), 'DTEND;VALUE=DATE:' + nextDay(date));
   }
-  lines.push(fold('SUMMARY:' + esc(summary)));
-  lines.push('END:VEVENT');
+  lines.push(fold('SUMMARY:' + esc(summary)), 'END:VEVENT');
   count++;
 }
 
 (async () => {
-  const clients = await db.collection('clients').get();
-  clients.forEach(doc => {
-    const c = doc.data();
-    const biz = c.business || c.name || 'Client';
-    (c.shootDays || []).forEach((s, i) => addEvent('shoot-'+doc.id+'-'+i, s, 'Shoot — ' + biz + (s.note ? ' (' + s.note + ')' : '')));
-    (c.meetings  || []).forEach((m, i) => addEvent('mtg-'+doc.id+'-'+i, m, 'Meeting — ' + biz + (m.title ? ': ' + m.title : '')));
-    if (c.nextTouch) addEvent('follow-'+doc.id, { date: c.nextTouch }, 'Follow-up — ' + biz);
+  const { date: today } = brisbaneParts(now);
+  const label = (p) => [p.client && p.client !== 'OFFscript' ? p.client : '', p.title || 'Untitled'].filter(Boolean).join(' - ');
+
+  (await db.collection('appProjects').get()).forEach((doc) => {
+    const p = doc.data() || {};
+    if (p.deleted) return;
+    const on = dayOf(p.on, today);
+    const time = hhmmToMin(p.time) != null ? String(p.time).slice(0, 5) : '';
+    if (p.isMeeting && on) {
+      const end = hhmmToMin(p.endTime);
+      addEvent('mtg-' + doc.id, on, time, end, 'Meeting - ' + label(p));
+    } else if (p.isShoot && on) {
+      addEvent('shoot-' + doc.id, on, time, null, 'Shoot - ' + label(p));
+    }
+    const due = dayOf(p.due, today);
+    if (due && due !== on && !p.done) addEvent('due-' + doc.id, due, '', null, 'Due - ' + label(p));
   });
 
-  // Standalone quick-add events (no client)
-  try {
-    const events = await db.collection('events').get();
-    events.forEach(doc => {
-      const e = doc.data();
-      const kind = e.type === 'shoot' ? 'Shoot' : 'Meeting';
-      addEvent('ev-'+doc.id, e, kind + ' — ' + (e.title || 'Untitled'));
-    });
-  } catch (e) { /* events collection may not exist yet */ }
-
-  // TASKS with a due date. Previously the feed only carried shoots, meetings and follow-ups, so a
-  // dated task existed in the app and nowhere else - you had to open the app to know what was due.
-  // `dueTime` (added 2026-07-28) makes it a timed one-hour event; date only stays all-day.
-  // Done and archived tasks are skipped: a calendar should show what's still coming.
-  try {
-    const tdoc = await db.doc('boards/tasks').get();
-    let tasks = [];
-    if (tdoc.exists) { try { tasks = JSON.parse(tdoc.data().json).tasks || []; } catch (e) {} }
-    tasks.forEach(t => {
-      if (t.archived || t.status === 'done' || t.done) return;
-      if (!t.scheduledDate) return;
-      const who = (t.assignees && t.assignees.length) ? t.assignees.join(' & ') : (t.assignee || '');
-      addEvent('task-' + t.id,
-        {
-          date: t.scheduledDate,
-          time: t.allDay ? '' : (t.startTime || t.dueTime || ''),   // dueTime = pre-Starts/Ends tasks
-          endDate: t.endDate || '',
-          endTime: t.allDay ? '' : (t.endTime || ''),
-        },
-        (t.title || 'Task') + (who ? ' — ' + who : ''));
-    });
-  } catch (e) { console.error('tasks -> calendar failed:', e.message); }
+  (await db.collection('appTasks').get()).forEach((doc) => {
+    const t = doc.data() || {};
+    if (t.done || t.deleted) return;
+    const due = dayOf(t.due, today);
+    if (!due) return;
+    addEvent('task-' + doc.id, due, timeOf(t.due), null, (t.title || 'Task') + (t.client && t.client !== 'OFFscript' ? ' - ' + t.client : ''));
+  });
 
   lines.push('END:VCALENDAR');
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
   fs.writeFileSync(OUT, lines.join('\r\n') + '\r\n');
   console.log('calendar written:', OUT, '| events:', count);
   process.exit(0);
-})().catch(e => { console.error('ERR', e.message); process.exit(1); });
+})().catch((e) => { console.error('ERR', e.message); process.exit(1); });

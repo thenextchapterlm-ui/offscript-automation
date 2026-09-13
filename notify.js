@@ -1,243 +1,111 @@
 /**
- * OFFscript notification worker — runs on a schedule (GitHub Actions).
- * Scans tasks + client follow-ups and sends web-push notifications via FCM to
- * each person's registered devices, even when the app is closed. Deduped via
- * notifications/sent so nobody gets pinged twice. Runs on Firebase's FREE plan.
+ * OFFscript notification worker - runs every 5 minutes on GitHub Actions.
  *
- * Auth: reads the service-account JSON from either
- *   - env FIREBASE_SERVICE_ACCOUNT  (the whole JSON string — used in GitHub Actions), or
- *   - env GOOGLE_APPLICATION_CREDENTIALS (a file path — used for local testing).
- * Pass --dry to log what WOULD be sent without actually sending.
+ * Reconnected to OFFscript Command (2026-09-13). It used to read the old dashboard's
+ * `boards/tasks` JSON blob and client follow-ups; nobody has written that board since
+ * 29 Aug, and every device on file is now a Command-app device, so it was checking a
+ * dead board and pushing to nobody.
+ *
+ * What it sends now (all to Command-app devices, by seat):
+ *   - A task in appTasks that is due today or overdue, to the people on it. Once per
+ *     task per due date, from 08:00 studio time.
+ *   - An agent that has stopped working (a GitHub agent reporting an error, or a Mac
+ *     helper in localAgents in the error state), to the founders. Once per agent per day.
+ *
+ * Assignment and crew notifications are NOT here: functions/command-push.js sends those
+ * the moment the record changes. Dedupe lives in notifications/command, separate from
+ * the old senders' notifications/sent so neither prunes the other's markers.
+ *
+ * Pass --dry to log what WOULD be sent without sending or writing.
  */
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
-const { getMessaging } = require('firebase-admin/messaging');
+const { FOUNDERS, brisbaneParts, sendToSeats, dayOf } = require('./command');
 
-// ── CONFIG (safe to tweak) ──────────────────────────────────────────────
-const TZ = 'Australia/Perth';   // team timezone — controls when "due today" / follow-up pings go out
-const DAILY_HOUR = 8;           // don't send date-based (due / follow-up) pings before this local hour
-const LOOKBACK_DAYS = 14;       // ignore dates older than this so a first run doesn't blast ancient items
-
+const DAILY_HOUR = 8;       // no date-based pings before 08:00 studio time
+const LOOKBACK_DAYS = 14;   // a first run must not blast weeks-old overdue work
 const DRY = process.argv.includes('--dry');
 
 function loadCreds() {
-  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    return JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-  }
-  const path = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  if (path) return require(path);
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) return JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) return require(process.env.GOOGLE_APPLICATION_CREDENTIALS);
   throw new Error('No credentials: set FIREBASE_SERVICE_ACCOUNT or GOOGLE_APPLICATION_CREDENTIALS');
 }
-
 initializeApp({ credential: cert(loadCreds()), projectId: 'offscript-platform-8deb4' });
 const db = getFirestore();
 
-function localParts(now) {
-  const fmt = new Intl.DateTimeFormat('en-CA', {
-    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hour12: false
-  });
-  const p = Object.fromEntries(fmt.formatToParts(now).map(x => [x.type, x.value]));
-  return { date: `${p.year}-${p.month}-${p.day}`, hour: parseInt(p.hour, 10) };
-}
-function daysBetween(a, b) { return Math.round((new Date(b) - new Date(a)) / 86400000); }
+const daysBetween = (a, b) => Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 86400000);
+const listOf = (v) => (Array.isArray(v) ? v.filter(Boolean) : []);
+/* Tasks written before multi-assign have only `owner`. */
+const assigneesOf = (t) => (listOf(t.assignees).length ? listOf(t.assignees) : (t.owner ? [t.owner] : []));
 
 (async () => {
   const now = new Date();
-  const { date: today, hour } = localParts(now);
+  const { date: today, hour } = brisbaneParts(now);
 
-  // Registered devices, grouped by person
-  const tokSnap = await db.collection('pushTokens').get();
-  const byPerson = {}; const all = [];
-  tokSnap.forEach(d => {
-    const t = d.data(); if (!t.token) return;
-    all.push(t.token);
-    const who = t.assignee || 'Team';
-    (byPerson[who] = byPerson[who] || []).push(t.token);
-  });
-  const targetsFor = who => (who && byPerson[who] ? byPerson[who] : all);
-  // A task may be assigned to several people — notify all of them.
-  const asgsOf = t => (t.assignees && t.assignees.length) ? t.assignees : (t.assignee ? [t.assignee] : []);
-  const targetsForMany = arr => { if (!arr || !arr.length) return all; const s = new Set(); arr.forEach(w => (byPerson[w] || []).forEach(x => s.add(x))); return s.size ? [...s] : all; };
-
-  // Dedupe map of already-sent events
-  const sentRef = db.doc('notifications/sent');
+  const sentRef = db.doc('notifications/command');
   const sentDoc = await sentRef.get();
   const sent = sentDoc.exists ? (sentDoc.data().keys || {}) : {};
+  /* The first run after the reconnect found 26 overdue tasks, some two weeks old. Sending
+     them all at once is a wall of pings about work people already know is late, so on the
+     very first run anything ALREADY overdue is recorded as seen and only today's go out. */
+  const firstRun = !sentDoc.exists;
+  const queue = []; // { key, seats, title, body, url }
 
-  const queue = []; // { key, tokens, title, body }
-
-  // ── TASKS ──
-  const tasksDoc = await db.doc('boards/tasks').get();
-  let tasks = [];
-  if (tasksDoc.exists) { try { tasks = JSON.parse(tasksDoc.data().json).tasks || []; } catch (e) {} }
-
-  for (const t of tasks) {
-    if (t.archived) continue;
-    const done = t.status === 'done' || t.done;
-    if (done) continue;
-
-    if (t.remindAt) {
-      const when = new Date(t.remindAt);
-      if (when <= now && (now - when) < LOOKBACK_DAYS * 86400000) {
-        const key = 'remind:' + t.id + ':' + t.remindAt;
-        if (!sent[key]) queue.push({ key, tokens: targetsForMany(asgsOf(t)), title: '⏰ Reminder', body: t.title });
-      }
-    }
-
-    if (t.scheduledDate && hour >= DAILY_HOUR &&
-        t.scheduledDate <= today && daysBetween(t.scheduledDate, today) <= LOOKBACK_DAYS) {
-      const key = 'due:' + t.id + ':' + t.scheduledDate;
-      if (!sent[key]) {
-        const overdue = t.scheduledDate < today;
-        queue.push({
-          key, tokens: targetsForMany(asgsOf(t)),
-          title: overdue ? '🔴 Overdue task' : '📌 Due today', body: t.title
-        });
-      }
-    }
-  }
-
-  // ── TASK ASSIGNMENT REQUESTS ──
-  // You can't put someone else on a task; you ASK, and it sits in `pendingAssignees` until they
-  // accept. That request was only visible if they happened to open the in-app notifications panel,
-  // which meant work could sit unanswered for days. Now it reaches their phone. No DAILY_HOUR gate:
-  // someone is actively waiting on the answer, so this goes out as soon as it's seen (<=5 min).
-  for (const t of tasks) {
-    if (t.archived) continue;
-    if (t.status === 'done' || t.done) continue;
-    const asked = (t.pendingAssignees && t.pendingAssignees.length)
-      ? t.pendingAssignees
-      : (t.offeredTo ? [t.offeredTo] : []);
-    for (const who of asked) {
-      if (!who) continue;
-      // Key includes the person, so a second person asked later still gets their own ping, and
-      // an ask -> decline -> re-ask cycle notifies again (the key changes with the request stamp).
-      const key = 'ask:' + t.id + ':' + who + ':' + (t.invitedBy || '');
-      if (sent[key]) continue;
-      const from = t.invitedBy || t.createdBy || '';
-      queue.push({
-        key, tokens: targetsFor(who),
-        title: from ? `🤝 ${from} asked you to take this on` : '🤝 New task request',
-        body: t.title,
-      });
-    }
-  }
-
-  // ── SUBTASK (STEP) REQUESTS + "YOU'RE UP NEXT" ──
-  // Subtasks are the app's handoff mechanism: a sequence of steps that can each belong to a
-  // different person. Both of their signals were dead ends before - a step request was only
-  // visible if you opened that task, and the "you're up next" nudge was an in-app toast that
-  // only the person who ticked the box ever saw.
-  for (const t of tasks) {
-    if (t.archived) continue;
-    if (t.status === 'done' || t.done) continue;
-    const steps = t.subtasks || [];
-
-    for (const st of steps) {
-      // Someone asked you to own a step.
-      if (st.pendingAssignee) {
-        const key = 'stepask:' + t.id + ':' + st.id + ':' + st.pendingAssignee;
-        if (!sent[key]) {
-          queue.push({
-            key, tokens: targetsFor(st.pendingAssignee),
-            title: (st.askedBy ? st.askedBy + ' asked you to take a step' : 'New step request'),
-            body: (st.title || 'Step') + ' - on "' + (t.title || '') + '"',
-          });
-        }
-      }
-    }
-
-    // The next unfinished step after the last completed one: its owner is up.
-    const firstOpen = steps.findIndex(s => s.status !== 'done');
-    if (firstOpen > 0) {                                   // > 0 means something before it is done
-      const up = steps[firstOpen];
-      const owner = up.assignee;
-      if (owner) {
-        // Keyed on how many steps are done, so each completion nudges once and only once.
-        const doneCount = steps.filter(s => s.status === 'done').length;
-        const key = 'stepnext:' + t.id + ':' + up.id + ':' + doneCount;
-        if (!sent[key]) {
-          queue.push({
-            key, tokens: targetsFor(owner),
-            title: '⏭ You\'re up next',
-            body: (up.title || 'Next step') + ' - on "' + (t.title || '') + '"',
-          });
-        }
-      }
-    }
+  // ── TASKS DUE ──
+  // `due` is an ISO date or the label the app showed ("Wed 16 Sep"); dayOf reads both.
+  // "Unscheduled" or unreadable text has no day to be due on and is skipped, never guessed.
+  let seeded = 0;
+  if (hour >= DAILY_HOUR) {
+    const tasks = await db.collection('appTasks').get();
+    tasks.forEach((d) => {
+      const t = d.data() || {};
+      if (t.done || t.deleted) return;
+      const due = dayOf(t.due, today);
+      if (!due) return;
+      if (due > today || daysBetween(due, today) > LOOKBACK_DAYS) return;
+      const seats = assigneesOf(t);
+      if (!seats.length) return;
+      const key = 'due:' + d.id + ':' + due;
+      if (sent[key]) return;
+      if (firstRun && due < today) { if (!DRY) sent[key] = Date.now(); seeded++; return; }
+      queue.push({ key, seats, title: due < today ? 'Overdue' : 'Due today', body: t.title || 'A task', url: '/app/#queue' });
+    });
   }
 
   // ── AGENT FAILURES ──
-  // The Releases Feed sat marked "Last run failed" for 16 days and nobody saw it, because the only
-  // place a broken agent shows up is the Agents tab. Failures now come to us. One ping per agent
-  // per day (the key carries the date) so a permanently broken agent nags daily instead of every
-  // 5 minutes, and stays visible until it's actually fixed.
-  const agentAlerts = [];
+  // The Releases Feed once sat "Last run failed" for 16 days because the only place a broken
+  // agent showed was a tab nobody opened. Failures come to the founders, once a day each.
+  // A helper that is SWITCHED OFF on purpose reports state 'off', not 'error', and is quiet.
+  const alerts = [];
   try {
-    const localSnap = await db.collection('localAgents').get();
-    localSnap.forEach(d => {
+    (await db.collection('localAgents').get()).forEach((d) => {
       const a = d.data() || {};
-      if (a.state === 'error') agentAlerts.push({ id: d.id, why: a.status || 'Last run failed' });
+      if (a.state === 'error') alerts.push({ id: d.id, why: a.status || 'Last run failed' });
     });
   } catch (e) { console.error('localAgents read failed', e.message); }
   try {
-    const agentSnap = await db.collection('agents').get();
-    agentSnap.forEach(d => {
+    (await db.collection('agents').get()).forEach((d) => {
       const a = d.data() || {};
-      if (a.enabled && (a.runStatus === 'error' || a.lastError)) {
-        agentAlerts.push({ id: d.id, why: String(a.lastError || 'Run failed').slice(0, 120) });
-      }
+      if (a.enabled && (a.runStatus === 'error' || a.lastError)) alerts.push({ id: d.id, why: String(a.lastError || 'Run failed').slice(0, 120) });
     });
   } catch (e) { console.error('agents read failed', e.message); }
-
-  for (const a of agentAlerts) {
+  for (const a of alerts) {
     const key = 'agentfail:' + a.id + ':' + today;
-    if (sent[key]) continue;
-    queue.push({ key, tokens: all, title: '⚠️ Agent stopped working', body: a.id + ' - ' + a.why });
+    if (!sent[key]) queue.push({ key, seats: FOUNDERS, title: 'An agent stopped working', body: a.id + ' - ' + a.why, url: '/app/#agents' });
   }
-
-  // ── CLIENT FOLLOW-UPS ──
-  const cliSnap = await db.collection('clients').get();
-  cliSnap.forEach(d => {
-    const c = d.data();
-    if (!c.active) return;
-    if (c.nextTouch && hour >= DAILY_HOUR &&
-        c.nextTouch <= today && daysBetween(c.nextTouch, today) <= LOOKBACK_DAYS) {
-      const key = 'followup:' + d.id + ':' + c.nextTouch;
-      if (!sent[key]) queue.push({ key, tokens: all, title: '👋 Follow-up due', body: (c.business || c.name || 'Client') });
-    }
-  });
 
   // ── SEND ──
   let pushed = 0;
-  for (const msg of queue) {
-    const tokens = [...new Set(msg.tokens)].filter(Boolean);
-    if (DRY) { console.log('[DRY] would send', msg.title, '-', msg.body, 'to', tokens.length, 'device(s)'); sent[msg.key] = Date.now(); continue; }
-    if (!tokens.length) { sent[msg.key] = Date.now(); continue; }
-    try {
-      const res = await getMessaging().sendEachForMulticast({
-        tokens,
-        data: { title: msg.title, body: msg.body, url: '/' },
-        webpush: { headers: { Urgency: 'high', TTL: '3600' }, fcmOptions: { link: '/' } }
-      });
-      pushed += res.successCount;
-      res.responses.forEach((r, i) => {
-        if (!r.success) {
-          const code = (r.error && r.error.code) || '';
-          if (code.includes('registration-token-not-registered') || code.includes('invalid-argument')) {
-            db.collection('pushTokens').doc(tokens[i]).delete().catch(() => {});
-          }
-        }
-      });
-    } catch (e) { console.error('send failed', msg.key, e.message); }
-    sent[msg.key] = Date.now();
+  for (const m of queue) {
+    if (DRY) { console.log('[DRY] would send', JSON.stringify({ title: m.title, body: m.body, seats: m.seats })); continue; }
+    pushed += await sendToSeats(db, m.seats, m.title, m.body, m.url);
+    sent[m.key] = Date.now();
   }
-
-  // Keep the dedupe doc small — drop markers older than 60 days
   const cutoff = Date.now() - 60 * 86400000;
   for (const k in sent) { if (typeof sent[k] === 'number' && sent[k] < cutoff) delete sent[k]; }
   if (!DRY) await sentRef.set({ keys: sent, lastRun: Date.now() }, { merge: true });
 
-  console.log(`run ok — today=${today} hour=${hour} tz=${TZ} candidates=${queue.length} pushed=${pushed} devices=${all.length}${DRY ? ' (DRY RUN)' : ''}`);
+  console.log(`run ok - today=${today} hour=${hour} candidates=${queue.length} pushed=${pushed} seededOverdue=${seeded}${DRY ? ' (DRY RUN)' : ''}`);
   process.exit(0);
-})().catch(e => { console.error('ERR', e.message); process.exit(1); });
+})().catch((e) => { console.error('ERR', e.message); process.exit(1); });
