@@ -9,6 +9,8 @@
  *   - meetings      appProjects with isMeeting: start, and endTime or one hour, as the app does
  *   - project dues  any project's `due` date, all-day, like the app's calendar
  *   - tasks         appTasks with a readable due date that are not done
+ *   - reminders     the old dashboard's standalone `events` (credential renewals), which the
+ *                   Command app does not hold
  *
  * Times: the app stores everything in studio time (Australia/Brisbane, UTC+10, no daylight
  * saving). The old feed wrote "floating" local times, which put a 10:00 Brisbane meeting at
@@ -91,6 +93,20 @@ function addEvent(uid, date, time, endMin, summary) {
     const due = dayOf(p.due, today);
     if (due && due !== on && !p.done) addEvent('due-' + doc.id, due, '', null, 'Due - ' + label(p));
   });
+
+  // Standalone quick-add events from the old dashboard. They are NOT in the Command app, and
+  // the two still ahead on 2026-09-13 are credential renewals these very workers depend on
+  // (GitHub token ~6 Oct, Microsoft 365 client secret ~8 Jan). Dropping this source with the
+  // rest of the old dashboard would have taken both reminders off everyone's calendar.
+  try {
+    (await db.collection('events').get()).forEach((doc) => {
+      const e = doc.data() || {};
+      const date = dayOf(e.date, today);
+      if (!date) return;
+      const time = hhmmToMin(e.time) != null ? String(e.time).slice(0, 5) : '';
+      addEvent('ev-' + doc.id, date, time, hhmmToMin(e.endTime), (e.type === 'shoot' ? 'Shoot' : 'Meeting') + ' - ' + (e.title || 'Untitled'));
+    });
+  } catch (e) { console.error('events -> calendar failed:', e.message); }
 
   (await db.collection('appTasks').get()).forEach((doc) => {
     const t = doc.data() || {};
